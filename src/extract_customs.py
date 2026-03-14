@@ -464,16 +464,18 @@ def write_to_sheet(ws, summary: dict, val_dtls: dict, items: list[dict], start_r
     return start_row + 3 + len(items) + 1
 
 
-def build_workbook(all_results: list[dict], output_path: str):
+def build_workbook(all_results: list[dict], skipped: list[tuple],
+                   failures: list[tuple], output_path: str):
     """
-    Create a single workbook with one sheet containing all PDFs appended vertically.
-    all_results = list of {"summary": ..., "val_dtls": ..., "items": [...]}
+    Create a single workbook with:
+      Sheet 1 "Customs Extract" — all valid PDFs appended vertically
+      Sheet 2 "Errors"          — skipped duplicates + extraction failures
     """
     wb = Workbook()
     ws = wb.active
     ws.title = "Customs Extract"
 
-    # Column widths (set once, shared by all PDF blocks)
+    # Column widths (shared by all PDF blocks)
     col_widths = {
         "A": 8.9375,  "B": 7.25,   "C": 9.25,
         "F": 9.625,   "G": 6.5625, "H": 8.8125, "I": 8.0625,
@@ -498,6 +500,46 @@ def build_workbook(all_results: list[dict], output_path: str):
             start_row=current_row
         )
 
+    # ── Errors sheet (always created) ────────────────────────────────────────
+    we = wb.create_sheet("Errors")
+    we.column_dimensions["A"].width = 40
+    we.column_dimensions["B"].width = 18
+    we.column_dimensions["C"].width = 50
+
+    hdr_fill  = PatternFill("solid", start_color="C00000")
+    hdr_font  = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+    row_fill  = PatternFill("solid", start_color="FFE0E0")
+    nrm_font  = Font(name="Arial", size=10)
+    center    = Alignment(horizontal="center", vertical="center")
+    left      = Alignment(horizontal="left",   vertical="center", wrap_text=True)
+
+    for col, label in enumerate(["File", "Type", "Reason"], 1):
+        cell = we.cell(row=1, column=col, value=label)
+        cell.font      = hdr_font
+        cell.fill      = hdr_fill
+        cell.alignment = center
+    we.row_dimensions[1].height = 18
+
+    row = 2
+    for filename, reason in skipped:
+        vals = [filename, "Duplicate", reason]
+        for col, val in enumerate(vals, 1):
+            cell = we.cell(row=row, column=col, value=val)
+            cell.font      = nrm_font
+            cell.fill      = row_fill
+            cell.alignment = left
+        we.row_dimensions[row].height = 16
+        row += 1
+
+    for filename, reason in failures:
+        vals = [filename, "Error", reason]
+        for col, val in enumerate(vals, 1):
+            cell = we.cell(row=row, column=col, value=val)
+            cell.font      = nrm_font
+            cell.alignment = left
+        we.row_dimensions[row].height = 16
+        row += 1
+
     wb.save(output_path)
     print(f"✅  Saved: {output_path}")
 
@@ -518,12 +560,12 @@ def main():
     )
     if not pdf_paths:
         messagebox.showinfo("Cancelled", "No files selected. Exiting.")
-        return
+        sys.exit(0)
 
     output_dir = filedialog.askdirectory(title="Select folder to save Excel output")
     if not output_dir:
         messagebox.showinfo("Cancelled", "No output folder selected. Exiting.")
-        return
+        sys.exit(0)
 
     # ── Progress window ───────────────────────────────────────────────────────
     progress_win = tk.Tk()
@@ -608,7 +650,7 @@ def main():
         progress_win.update()
 
     # ── Write single combined Excel ───────────────────────────────────────────
-    if all_results:
+    if all_results or skipped or failures:
         status_label.config(text="Building Excel...")
         progress_win.update()
 
@@ -618,11 +660,10 @@ def main():
 
         log(f"\n→ Writing {len(all_results)} PDF(s) to {output_name} ...")
         try:
-            build_workbook(all_results, output_path)
+            build_workbook(all_results, skipped, failures, output_path)
             log(f"✅ Saved: {output_path}")
         except Exception as e:
             log(f"❌ Failed to save Excel: {e}")
-            failures.append((output_name, str(e)))
 
     # ── Done summary ──────────────────────────────────────────────────────────
     status_label.config(text="Done!")
@@ -633,19 +674,15 @@ def main():
         f"❌ {len(failures)} failed\n\n"
         f"Saved to:\n{output_dir}"
     )
-
-    if skipped:
-        summary_msg += "\n\nSkipped (duplicates):\n"
-        summary_msg += "\n".join(f"  • {f} — {r}" for f, r in skipped)
-
-    if failures:
-        summary_msg += "\n\nFailed:\n"
-        summary_msg += "\n".join(f"  • {f}: {r}" for f, r in failures)
+    if skipped or failures:
+        summary_msg += "\n\nSee the 'Errors' sheet in the Excel file for details."
 
     log("\n" + "=" * 50)
     log(summary_msg)
     messagebox.showinfo("Complete", summary_msg)
+    progress_win.protocol("WM_DELETE_WINDOW", lambda: (progress_win.destroy(), sys.exit(0)))
     progress_win.mainloop()
+    sys.exit(0)
 
 
 if __name__ == "__main__":
