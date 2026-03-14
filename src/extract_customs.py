@@ -324,162 +324,180 @@ def extract_part2(pdf_path: str, part2_text: str) -> dict:
 
 # ── 3. EXCEL OUTPUT ───────────────────────────────────────────────────────────
 
-def build_excel(summary: dict, val_dtls: dict, items: list[dict], output_path: str):
+def write_to_sheet(ws, summary: dict, val_dtls: dict, items: list[dict], start_row: int) -> int:
+    """
+    Write one PDF's data into ws starting at start_row.
+    Returns the next available row after all data is written.
+
+    Layout per PDF (relative to start_row):
+      start_row + 0 : Part I + Val Dtls headers  (cols A–AN)
+      start_row + 1 : Part I + Val Dtls values    (cols A–AN)
+      start_row + 2 : Item table headers          (cols AP–AU)
+      start_row + 3+: Item rows
+    """
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    left   = Alignment(horizontal="left",   vertical="center", wrap_text=True)
+
+    def cell_style(cell, value, bold=False, bg=None, font_color="000000",
+                   align=None, nfmt=None):
+        cell.value = value
+        cell.font  = Font(name="Arial", bold=bold, size=10, color=font_color)
+        if bg:
+            cell.fill = PatternFill("solid", start_color=bg)
+        if align:
+            cell.alignment = align
+        if nfmt:
+            cell.number_format = nfmt
+
+    # ── Header row ────────────────────────────────────────────────────────────
+    hr = start_row
+    ws.row_dimensions[hr].height = 13.9
+
+    header_cols = [
+        (1,  "Port Code",        "DEEAF1"),
+        (2,  "SB No",            None),
+        (3,  "SB Date",          "DEEAF1"),
+        (6,  "FOB Value",        "DEEAF1"),
+        (7,  "Freight",          None),
+        (8,  "Insurance",        "DEEAF1"),
+        (9,  "Discount",         None),
+        (10, "COM",              "DEEAF1"),
+        (11, "Deductions",       None),
+        (12, "P/C",              "DEEAF1"),
+        (13, "Duty",             None),
+        (14, "Cess",             "DEEAF1"),
+        (17, "DBK Claim",        "DEEAF1"),
+        (18, "IGST AMT",         None),
+        (19, "Cess AMT",         "DEEAF1"),
+        (20, "IGST Value",       None),
+        (21, "RODTEP AMT",       "DEEAF1"),
+        (22, "ROSCTL AMT",       None),
+        (25, "INV No",           "DEEAF1"),
+        (26, "INV AMT",          None),
+        (27, "Currency",         "DEEAF1"),
+        (30, "Invoice Value",    "DEEAF1"),
+        (31, "Invoice Currency", None),
+        (32, "FOB Value",        "DEEAF1"),
+        (33, "FOB Currency",     None),
+        (34, "Freight",          "DEEAF1"),
+        (35, "Insurance",        None),
+        (36, "Discount",         "DEEAF1"),
+        (37, "Commission",       None),
+        (38, "Deduct",           "DEEAF1"),
+        (39, "P/C",              None),
+        (40, "Exchange Rate",    "DEEAF1"),
+    ]
+    for col_idx, label, bg in header_cols:
+        cell_style(ws.cell(row=hr, column=col_idx), label, bold=True, bg=bg)
+
+    # ── Value row ─────────────────────────────────────────────────────────────
+    vr = start_row + 1
+    value_cols = [
+        (1,  summary.get("port_code")),
+        (2,  summary.get("sb_no")),
+        (3,  summary.get("sb_date")),
+        (6,  summary.get("fob_value")),
+        (7,  summary.get("freight")),
+        (8,  summary.get("insurance")),
+        (9,  summary.get("discount")),
+        (10, summary.get("com")),
+        (11, summary.get("deductions")),
+        (12, summary.get("pc")),
+        (13, summary.get("duty")),
+        (14, summary.get("cess")),
+        (17, summary.get("dbk_claim")),
+        (18, summary.get("igst_amt")),
+        (19, summary.get("cess_amt")),
+        (20, summary.get("igst_value")),
+        (21, summary.get("rodtep_amt")),
+        (22, summary.get("rosctl_amt")),
+        (25, summary.get("inv_no")),
+        (26, summary.get("inv_amt")),
+        (27, summary.get("currency")),
+        (30, val_dtls.get("invoice_value")),
+        (31, val_dtls.get("invoice_currency")),
+        (32, val_dtls.get("fob_value")),
+        (33, val_dtls.get("fob_currency")),
+        (34, val_dtls.get("freight")),
+        (35, val_dtls.get("insurance")),
+        (36, val_dtls.get("discount")),
+        (37, val_dtls.get("commission")),
+        (38, val_dtls.get("deduct")),
+        (39, val_dtls.get("pc")),
+        (40, val_dtls.get("exchange_rate")),
+    ]
+    for col_idx, value in value_cols:
+        cell_style(ws.cell(row=vr, column=col_idx), value, bg="FFFF00")
+
+    # ── Item headers row ──────────────────────────────────────────────────────
+    ihr = start_row + 2
+    ws.row_dimensions[ihr].height = 26.25
+
+    cell_style(ws.cell(row=ihr, column=42), "SB No", bold=True)
+    for i, hdr in enumerate(["HS Code", "Description", "Quantity", "Rate (USD)", "Value F/C (USD)"]):
+        cell_style(ws.cell(row=ihr, column=43 + i), hdr,
+                   bold=True, bg="2E75B6", font_color="FFFFFF", align=center)
+
+    # ── Item rows ─────────────────────────────────────────────────────────────
+    sb_no      = summary.get("sb_no", "")
+    item_nfmts = [None, None, "#,##0", "#,##0.000", "#,##0.00"]
+    item_aligns = [center, left, center, center, center]
+
+    for idx, item in enumerate(items):
+        r      = start_row + 3 + idx
+        fill_bg = "DEEAF1" if idx % 2 == 0 else None
+
+        cell_style(ws.cell(row=r, column=42), sb_no, bg="FFFF00")
+
+        values = [
+            item.get("hs_code"),
+            item.get("description"),
+            item.get("quantity"),
+            item.get("rate"),
+            item.get("value_fc"),
+        ]
+        for i, (val, aln, nfmt) in enumerate(zip(values, item_aligns, item_nfmts)):
+            cell_style(ws.cell(row=r, column=43 + i), val,
+                       bg=fill_bg, align=aln, nfmt=nfmt)
+
+    # Return next available row (leave 1 blank gap between PDFs)
+    return start_row + 3 + len(items) + 1
+
+
+def build_workbook(all_results: list[dict], output_path: str):
+    """
+    Create a single workbook with one sheet containing all PDFs appended vertically.
+    all_results = list of {"summary": ..., "val_dtls": ..., "items": [...]}
+    """
     wb = Workbook()
     ws = wb.active
     ws.title = "Customs Extract"
 
-    # Styles
-    hdr_fill    = PatternFill("solid", start_color="1F4E79")
-    sub_fill    = PatternFill("solid", start_color="2E75B6")
-    yellow_fill = PatternFill("solid", start_color="FFFF00")
-    alt_fill    = PatternFill("solid", start_color="DEEAF1")
-    hdr_font    = Font(name="Arial", bold=True, color="FFFFFF", size=10)
-    sub_font    = Font(name="Arial", bold=True, color="FFFFFF", size=10)
-    normal_font = Font(name="Arial", size=10)
-    bold_font   = Font(name="Arial", bold=True, size=10)
-    left        = Alignment(horizontal="left",   vertical="center", wrap_text=True)
-    center      = Alignment(horizontal="center", vertical="center")
-    right_align = Alignment(horizontal="right",  vertical="center")
+    # Column widths (set once, shared by all PDF blocks)
+    col_widths = {
+        "A": 8.9375,  "B": 7.25,   "C": 9.25,
+        "F": 9.625,   "G": 6.5625, "H": 8.8125, "I": 8.0625,
+        "J": 4.5625,  "K": 10.0625,"L": 3.5625, "M": 4.5,    "N": 4.75,
+        "Q": 9.75,    "R": 8.875,  "S": 9.8125,
+        "T": 9.8125,  "U": 12.0625,"V": 12.0,
+        "Y": 8.5625,  "Z": 7.6875, "AA": 8.25,
+        "AD": 11.6875,"AE": 14.75, "AF": 9.375, "AG": 12.4375,
+        "AH": 6.5625, "AI": 8.8125,"AJ": 8.0625,"AK": 11.25,
+        "AL": 6.5,    "AM": 3.5625,"AN": 13.0,
+    }
+    for col_letter, width in col_widths.items():
+        ws.column_dimensions[col_letter].width = width
 
-    thin   = Side(style="thin", color="B8CCE4")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    current_row = 1
+    for result in all_results:
+        current_row = write_to_sheet(
+            ws,
+            result["summary"],
+            result["val_dtls"],
+            result["items"],
+            start_row=current_row
+        )
 
-    def apply(cell, font=None, fill=None, alignment=None, border=None, number_format=None):
-        if font:          cell.font          = font
-        if fill:          cell.fill          = fill
-        if alignment:     cell.alignment     = alignment
-        if border:        cell.border        = border
-        if number_format: cell.number_format = number_format
-
-    def write_header_row(row, fields, start_col=2):
-        """Write a dark blue header row with field labels horizontally."""
-        for i, (label, _) in enumerate(fields):
-            col = start_col + i
-            cell = ws.cell(row=row, column=col, value=label)
-            apply(cell, font=hdr_font, fill=hdr_fill, alignment=center, border=border)
-        ws.row_dimensions[row].height = 18
-
-    def write_value_row(row, fields, start_col=2, num_fmts=None):
-        """Write a yellow value row horizontally."""
-        for i, (_, value) in enumerate(fields):
-            col = start_col + i
-            cell = ws.cell(row=row, column=col, value=value)
-            nfmt = num_fmts[i] if num_fmts else None
-            apply(cell, font=normal_font, fill=yellow_fill, alignment=center,
-                  border=border, number_format=nfmt)
-        ws.row_dimensions[row].height = 18
-
-    # ── All field definitions ─────────────────────────────────────────────────
-
-    part1_fields = [
-        ("Port Code",  summary.get("port_code")),
-        ("SB No",      summary.get("sb_no")),
-        ("SB Date",    summary.get("sb_date")),
-        ("FOB Value",  summary.get("fob_value")),
-        ("Freight",    summary.get("freight")),
-        ("Insurance",  summary.get("insurance")),
-        ("Discount",   summary.get("discount")),
-        ("COM",        summary.get("com")),
-        ("Deductions", summary.get("deductions")),
-        ("P/C",        summary.get("pc")),
-        ("Duty",       summary.get("duty")),
-        ("Cess",       summary.get("cess")),
-        ("DBK Claim",  summary.get("dbk_claim")),
-        ("IGST AMT",   summary.get("igst_amt")),
-        ("Cess AMT",   summary.get("cess_amt")),
-        ("IGST Value", summary.get("igst_value")),
-        ("RODTEP AMT", summary.get("rodtep_amt")),
-        ("ROSCTL AMT", summary.get("rosctl_amt")),
-        ("INV No",     summary.get("inv_no")),
-        ("INV AMT",    summary.get("inv_amt")),
-        ("Currency",   summary.get("currency")),
-    ]
-
-    val_dtls_fields = [
-        ("Invoice Value",    val_dtls.get("invoice_value")),
-        ("Invoice Currency", val_dtls.get("invoice_currency")),
-        ("FOB Value",        val_dtls.get("fob_value")),
-        ("FOB Currency",     val_dtls.get("fob_currency")),
-        ("Freight",          val_dtls.get("freight")),
-        ("Insurance",        val_dtls.get("insurance")),
-        ("Discount",         val_dtls.get("discount")),
-        ("Commission",       val_dtls.get("commission")),
-        ("Deduct",           val_dtls.get("deduct")),
-        ("P/C",              val_dtls.get("pc")),
-        ("Exchange Rate",    val_dtls.get("exchange_rate")),
-    ]
-
-    item_fields  = ["Item No", "HS Code", "Description", "Quantity", "Rate (USD)", "Value F/C (USD)"]
-    item_nfmts   = [None,      None,       None,          "#,##0",    "#,##0.000",  "#,##0.00"]
-    item_aligns  = [center,    center,     left,          right_align, right_align, right_align]
-
-    # ── Column widths ─────────────────────────────────────────────────────────
-    # Col 1 = left padding, cols 2+ = data
-    ws.column_dimensions["A"].width = 3  # left padding
-
-    # Part I: 21 fields starting at col B (2)
-    part1_widths = [11, 13, 13, 13, 10, 10, 10, 8, 12, 6, 8, 8,
-                    11, 11, 11, 11, 13, 13, 13, 13, 10]
-    for i, w in enumerate(part1_widths):
-        ws.column_dimensions[get_column_letter(2 + i)].width = w
-
-    # Val dtls: 11 fields — reuse same cols 2-12 (they share the same columns)
-    # Items: 6 fields starting at col B (2) as well
-
-    # ── Row 1: top padding ────────────────────────────────────────────────────
-    ws.row_dimensions[1].height = 8
-
-    # ── Rows 2-3: Part I (headers + values) ──────────────────────────────────
-    write_header_row(2, part1_fields, start_col=2)
-    write_value_row(3, part1_fields, start_col=2)
-
-    # ── Row 4: spacer ─────────────────────────────────────────────────────────
-    ws.row_dimensions[4].height = 8
-
-    # ── Rows 5-6: Val Dtls (headers + values) ────────────────────────────────
-    write_header_row(5, val_dtls_fields, start_col=2)
-    write_value_row(6, val_dtls_fields, start_col=2)
-
-    # ── Row 7: spacer ─────────────────────────────────────────────────────────
-    ws.row_dimensions[7].height = 8
-
-    # ── Row 8: Items column headers ───────────────────────────────────────────
-    for i, h in enumerate(item_fields):
-        cell = ws.cell(row=8, column=2 + i, value=h)
-        apply(cell, font=sub_font, fill=sub_fill, alignment=center, border=border)
-    ws.row_dimensions[8].height = 18
-
-    # ── Rows 9+: Item data ────────────────────────────────────────────────────
-    for idx, item in enumerate(items):
-        r = 9 + idx
-        fill = alt_fill if idx % 2 == 0 else None
-        values = [item.get("item_no"), item.get("hs_code"), item.get("description"),
-                  item.get("quantity"), item.get("rate"), item.get("value_fc")]
-        for i, (val, aln, nfmt) in enumerate(zip(values, item_aligns, item_nfmts)):
-            cell = ws.cell(row=r, column=2 + i, value=val)
-            apply(cell, font=normal_font, fill=fill, alignment=aln,
-                  border=border, number_format=nfmt)
-        ws.row_dimensions[r].height = 28
-
-    # ── Totals row ────────────────────────────────────────────────────────────
-    total_row = 9 + len(items)
-    ws.cell(row=total_row, column=2, value="TOTAL")
-    apply(ws.cell(row=total_row, column=2), font=bold_font, fill=sub_fill,
-          alignment=right_align, border=border)
-    apply(ws.cell(row=total_row, column=3), fill=sub_fill, border=border)  # HS Code blank
-    apply(ws.cell(row=total_row, column=4), fill=sub_fill, border=border)  # Description blank
-
-    qty_cell   = ws.cell(row=total_row, column=5,
-                         value=f"=SUM(E9:E{total_row-1})")
-    value_cell = ws.cell(row=total_row, column=7,
-                         value=f"=SUM(G9:G{total_row-1})")
-    for cell, nfmt in [(qty_cell, "#,##0"), (value_cell, "#,##0.00")]:
-        apply(cell, font=bold_font, fill=yellow_fill,
-              alignment=right_align, border=border, number_format=nfmt)
-    apply(ws.cell(row=total_row, column=6), fill=sub_fill, border=border)  # Rate blank
-
-    ws.freeze_panes = "B9"
     wb.save(output_path)
     print(f"✅  Saved: {output_path}")
 
@@ -490,21 +508,19 @@ def main():
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
 
-    # ── File picker window ────────────────────────────────────────────────────
+    # ── File picker ───────────────────────────────────────────────────────────
     root = tk.Tk()
-    root.withdraw()  # Hide the root window
+    root.withdraw()
 
     pdf_paths = filedialog.askopenfilenames(
         title="Select Customs PDF files to process",
         filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")]
     )
-
     if not pdf_paths:
         messagebox.showinfo("Cancelled", "No files selected. Exiting.")
         return
 
-    # Ask where to save outputs
-    output_dir = filedialog.askdirectory(title="Select folder to save Excel outputs")
+    output_dir = filedialog.askdirectory(title="Select folder to save Excel output")
     if not output_dir:
         messagebox.showinfo("Cancelled", "No output folder selected. Exiting.")
         return
@@ -516,14 +532,11 @@ def main():
     progress_win.resizable(False, False)
 
     tk.Label(progress_win, text="Processing PDFs...", font=("Arial", 12, "bold")).pack(pady=10)
-
     progress_bar = ttk.Progressbar(progress_win, length=460, mode="determinate",
                                    maximum=len(pdf_paths))
     progress_bar.pack(pady=5, padx=20)
-
     status_label = tk.Label(progress_win, text="", font=("Arial", 9), wraplength=460)
     status_label.pack(pady=5)
-
     log_box = tk.Text(progress_win, height=10, font=("Courier", 8), state="disabled")
     log_box.pack(pady=5, padx=20, fill="both", expand=True)
 
@@ -534,9 +547,9 @@ def main():
         log_box.config(state="disabled")
         progress_win.update()
 
-    # ── Process each PDF ──────────────────────────────────────────────────────
+    # ── Process each PDF, collect results ────────────────────────────────────
     import os
-    successes, failures = [], []
+    all_results, failures = [], []
 
     for i, pdf_path in enumerate(pdf_paths):
         filename = os.path.basename(pdf_path)
@@ -545,9 +558,6 @@ def main():
         progress_win.update()
 
         try:
-            output_filename = os.path.splitext(filename)[0] + "_extracted.xlsx"
-            output_path = os.path.join(output_dir, output_filename)
-
             log("  → Reading PDF...")
             part1_text, part2_text = get_part_texts(pdf_path)
 
@@ -559,11 +569,8 @@ def main():
             val_dtls = part2_data.get("val_dtls", {})
             items    = part2_data.get("items", [])
 
-            log(f"  → Building Excel ({len(items)} items)...")
-            build_excel(summary, val_dtls, items, output_path)
-
-            log(f"  ✅ Saved: {output_filename}")
-            successes.append(filename)
+            all_results.append({"summary": summary, "val_dtls": val_dtls, "items": items})
+            log(f"  ✅ Extracted {len(items)} items")
 
         except Exception as e:
             log(f"  ❌ ERROR: {e}")
@@ -572,15 +579,28 @@ def main():
         progress_bar["value"] = i + 1
         progress_win.update()
 
-    # ── Done summary ──────────────────────────────────────────────────────────
+    # ── Write single combined Excel ───────────────────────────────────────────
+    if all_results:
+        status_label.config(text="Building Excel...")
+        progress_win.update()
+        output_path = os.path.join(output_dir, "customs_extracted.xlsx")
+        log(f"\n→ Writing {len(all_results)} PDF(s) to customs_extracted.xlsx ...")
+        try:
+            build_workbook(all_results, output_path)
+            log(f"✅ Saved: {output_path}")
+        except Exception as e:
+            log(f"❌ Failed to save Excel: {e}")
+            failures.append(("customs_extracted.xlsx", str(e)))
+
+    # ── Done ──────────────────────────────────────────────────────────────────
     status_label.config(text="Done!")
-    summary_msg = f"✅ {len(successes)} succeeded,  ❌ {len(failures)} failed.\n\nOutputs saved to:\n{output_dir}"
+    summary_msg = (f"✅ {len(all_results)} PDF(s) extracted into customs_extracted.xlsx\n"
+                   f"❌ {len(failures)} failed\n\nSaved to:\n{output_dir}")
     if failures:
-        summary_msg += "\n\nFailed files:\n" + "\n".join(f"  • {f[0]}: {f[1]}" for f in failures)
+        summary_msg += "\n\nFailed:\n" + "\n".join(f"  • {f[0]}: {f[1]}" for f in failures)
 
-    log("\n" + "="*50)
+    log("\n" + "=" * 50)
     log(summary_msg)
-
     messagebox.showinfo("Complete", summary_msg)
     progress_win.mainloop()
 
