@@ -1,0 +1,73 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # allows manual trigger from GitHub UI
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build EXE with PyInstaller
+        run: |
+          pyinstaller `
+            --onefile `
+            --windowed `
+            --name "CustomsExtractor" `
+            --icon src/icon.ico `
+            --add-data "src;src" `
+            src/extract_customs.py
+        continue-on-error: false
+
+      - name: Build EXE (no icon fallback)
+        if: failure()
+        run: |
+          pyinstaller `
+            --onefile `
+            --windowed `
+            --name "CustomsExtractor" `
+            src/extract_customs.py
+
+      - name: Upload EXE as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CustomsExtractor-Windows
+          path: dist/CustomsExtractor.exe
+          retention-days: 30
+
+      - name: Create Release (on push to main)
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: "CustomsExtractor v${{ github.run_number }}"
+          body: |
+            ## Customs PDF Extractor
+
+            ### How to use
+            1. Download `CustomsExtractor.exe` below
+            2. Place `key.txt` in the same folder with your Anthropic API key
+            3. Double-click to run — select PDFs, select output folder, done
+
+            ### key.txt format
+            ```
+            sk-ant-your-key-here
+            ```
+          files: dist/CustomsExtractor.exe
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

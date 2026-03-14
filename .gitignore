@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+dist/
+build/
+*.spec
+.env
+key.txt
+*.xlsx
+*.pdf
+venv/
+.venv/
