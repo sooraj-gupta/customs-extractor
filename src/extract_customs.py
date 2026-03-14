@@ -326,21 +326,23 @@ def extract_part2(pdf_path: str, part2_text: str) -> dict:
 
 def build_excel(summary: dict, val_dtls: dict, items: list[dict], output_path: str):
     wb = Workbook()
+    ws = wb.active
+    ws.title = "Customs Extract"
 
     # Styles
-    hdr_font      = Font(name="Arial", bold=True, color="FFFFFF", size=10)
-    hdr_fill      = PatternFill("solid", start_color="1F4E79")
-    sub_fill      = PatternFill("solid", start_color="2E75B6")
-    sub_font      = Font(name="Arial", bold=True, color="FFFFFF", size=10)
-    alt_fill      = PatternFill("solid", start_color="DEEAF1")
-    yellow_fill   = PatternFill("solid", start_color="FFFF00")
-    normal_font   = Font(name="Arial", size=10)
-    bold_font     = Font(name="Arial", bold=True, size=10)
-    center        = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    left          = Alignment(horizontal="left",   vertical="center", wrap_text=True)
-    right_align   = Alignment(horizontal="right",  vertical="center")
+    hdr_fill    = PatternFill("solid", start_color="1F4E79")
+    sub_fill    = PatternFill("solid", start_color="2E75B6")
+    yellow_fill = PatternFill("solid", start_color="FFFF00")
+    alt_fill    = PatternFill("solid", start_color="DEEAF1")
+    hdr_font    = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+    sub_font    = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+    normal_font = Font(name="Arial", size=10)
+    bold_font   = Font(name="Arial", bold=True, size=10)
+    left        = Alignment(horizontal="left",   vertical="center", wrap_text=True)
+    center      = Alignment(horizontal="center", vertical="center")
+    right_align = Alignment(horizontal="right",  vertical="center")
 
-    thin = Side(style="thin", color="B8CCE4")
+    thin   = Side(style="thin", color="B8CCE4")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
     def apply(cell, font=None, fill=None, alignment=None, border=None, number_format=None):
@@ -350,135 +352,134 @@ def build_excel(summary: dict, val_dtls: dict, items: list[dict], output_path: s
         if border:        cell.border        = border
         if number_format: cell.number_format = number_format
 
-    def write_kv_sheet(ws, title, sections):
-        ws.column_dimensions["A"].width = 6
-        ws.column_dimensions["B"].width = 34
-        ws.column_dimensions["C"].width = 24
-        ws.column_dimensions["D"].width = 6
-        ws.merge_cells("A1:D1")
-        ws["A1"] = title
-        apply(ws["A1"], font=Font(name="Arial", bold=True, size=12, color="FFFFFF"),
-              fill=hdr_fill, alignment=center)
-        ws.row_dimensions[1].height = 28
-        row = 2
-        for section_title, fields in sections:
-            ws.merge_cells(f"A{row}:D{row}")
-            ws[f"A{row}"] = section_title
-            apply(ws[f"A{row}"], font=sub_font, fill=sub_fill, alignment=left)
-            ws.row_dimensions[row].height = 18
-            row += 1
-            for i, (label, value) in enumerate(fields):
-                fill = alt_fill if i % 2 == 0 else None
-                ws[f"B{row}"] = label
-                ws[f"C{row}"] = value
-                apply(ws[f"B{row}"], font=bold_font, fill=fill,  alignment=left, border=border)
-                apply(ws[f"C{row}"], font=normal_font, fill=yellow_fill, alignment=left, border=border)
-                ws.row_dimensions[row].height = 16
-                row += 1
-            row += 1
+    def write_header_row(row, fields, start_col=2):
+        """Write a dark blue header row with field labels horizontally."""
+        for i, (label, _) in enumerate(fields):
+            col = start_col + i
+            cell = ws.cell(row=row, column=col, value=label)
+            apply(cell, font=hdr_font, fill=hdr_fill, alignment=center, border=border)
+        ws.row_dimensions[row].height = 18
 
-    # ── Sheet 1: Part I Summary ───────────────────────────────────────────────
-    ws1 = wb.active
-    ws1.title = "Part I – Summary"
-    write_kv_sheet(ws1, "INDIAN CUSTOMS EDI SYSTEM – SHIPPING BILL SUMMARY (PART I)", [
-        ("IDENTIFICATION", [
-            ("Port Code",  summary.get("port_code")),
-            ("SB No",      summary.get("sb_no")),
-            ("SB Date",    summary.get("sb_date")),
-        ]),
-        ("VALUATION SUMMARY (C. VALU SUMMA)", [
-            ("FOB Value",   summary.get("fob_value")),
-            ("Freight",     summary.get("freight")),
-            ("Insurance",   summary.get("insurance")),
-            ("Discount",    summary.get("discount")),
-            ("COM",         summary.get("com")),
-            ("Deductions",  summary.get("deductions")),
-            ("P/C",         summary.get("pc")),
-            ("Duty",        summary.get("duty")),
-            ("Cess",        summary.get("cess")),
-        ]),
-        ("EXPORT PROMOTION (D. EX.PR.)", [
-            ("DBK Claim",   summary.get("dbk_claim")),
-            ("IGST AMT",    summary.get("igst_amt")),
-            ("Cess AMT",    summary.get("cess_amt")),
-            ("IGST Value",  summary.get("igst_value")),
-            ("RODTEP AMT",  summary.get("rodtep_amt")),
-            ("ROSCTL AMT",  summary.get("rosctl_amt")),
-        ]),
-        ("INVOICE (F. INVOICE SUMMARY)", [
-            ("INV No",      summary.get("inv_no")),
-            ("INV AMT",     summary.get("inv_amt")),
-            ("Currency",    summary.get("currency")),
-        ]),
-    ])
+    def write_value_row(row, fields, start_col=2, num_fmts=None):
+        """Write a yellow value row horizontally."""
+        for i, (_, value) in enumerate(fields):
+            col = start_col + i
+            cell = ws.cell(row=row, column=col, value=value)
+            nfmt = num_fmts[i] if num_fmts else None
+            apply(cell, font=normal_font, fill=yellow_fill, alignment=center,
+                  border=border, number_format=nfmt)
+        ws.row_dimensions[row].height = 18
 
-    # ── Sheet 2: Part II – C.VAL DTLS ────────────────────────────────────────
-    ws2 = wb.create_sheet("Part II – Val Dtls")
-    write_kv_sheet(ws2, "INDIAN CUSTOMS EDI SYSTEM – INVOICE VALUATION DETAILS (PART II)", [
-        ("C.VAL DTLS – INVOICE VALUATION", [
-            ("Invoice Value",   val_dtls.get("invoice_value")),
-            ("Invoice Currency",val_dtls.get("invoice_currency")),
-            ("FOB Value",       val_dtls.get("fob_value")),
-            ("FOB Currency",    val_dtls.get("fob_currency")),
-            ("Freight",         val_dtls.get("freight")),
-            ("Insurance",       val_dtls.get("insurance")),
-            ("Discount",        val_dtls.get("discount")),
-            ("Commission",      val_dtls.get("commission")),
-            ("Deduct",          val_dtls.get("deduct")),
-            ("P/C",             val_dtls.get("pc")),
-            ("Exchange Rate",   val_dtls.get("exchange_rate")),
-        ]),
-    ])
+    # ── All field definitions ─────────────────────────────────────────────────
 
-    # ── Sheet 3: Part II – Items ──────────────────────────────────────────────
-    ws3 = wb.create_sheet("Part II – Items")
+    part1_fields = [
+        ("Port Code",  summary.get("port_code")),
+        ("SB No",      summary.get("sb_no")),
+        ("SB Date",    summary.get("sb_date")),
+        ("FOB Value",  summary.get("fob_value")),
+        ("Freight",    summary.get("freight")),
+        ("Insurance",  summary.get("insurance")),
+        ("Discount",   summary.get("discount")),
+        ("COM",        summary.get("com")),
+        ("Deductions", summary.get("deductions")),
+        ("P/C",        summary.get("pc")),
+        ("Duty",       summary.get("duty")),
+        ("Cess",       summary.get("cess")),
+        ("DBK Claim",  summary.get("dbk_claim")),
+        ("IGST AMT",   summary.get("igst_amt")),
+        ("Cess AMT",   summary.get("cess_amt")),
+        ("IGST Value", summary.get("igst_value")),
+        ("RODTEP AMT", summary.get("rodtep_amt")),
+        ("ROSCTL AMT", summary.get("rosctl_amt")),
+        ("INV No",     summary.get("inv_no")),
+        ("INV AMT",    summary.get("inv_amt")),
+        ("Currency",   summary.get("currency")),
+    ]
 
-    # Columns: Item No, HS Code, Description, Quantity, Rate, Value F/C
-    col_widths = [10, 14, 55, 12, 14, 16]
-    for i, w in enumerate(col_widths):
-        ws3.column_dimensions[get_column_letter(i+1)].width = w
+    val_dtls_fields = [
+        ("Invoice Value",    val_dtls.get("invoice_value")),
+        ("Invoice Currency", val_dtls.get("invoice_currency")),
+        ("FOB Value",        val_dtls.get("fob_value")),
+        ("FOB Currency",     val_dtls.get("fob_currency")),
+        ("Freight",          val_dtls.get("freight")),
+        ("Insurance",        val_dtls.get("insurance")),
+        ("Discount",         val_dtls.get("discount")),
+        ("Commission",       val_dtls.get("commission")),
+        ("Deduct",           val_dtls.get("deduct")),
+        ("P/C",              val_dtls.get("pc")),
+        ("Exchange Rate",    val_dtls.get("exchange_rate")),
+    ]
 
-    ws3.merge_cells("A1:F1")
-    ws3["A1"] = "INDIAN CUSTOMS EDI SYSTEM – INVOICE ITEM DETAILS (PART II)"
-    apply(ws3["A1"], font=Font(name="Arial", bold=True, size=12, color="FFFFFF"),
-          fill=hdr_fill, alignment=center)
-    ws3.row_dimensions[1].height = 28
+    item_fields  = ["Item No", "HS Code", "Description", "Quantity", "Rate (USD)", "Value F/C (USD)"]
+    item_nfmts   = [None,      None,       None,          "#,##0",    "#,##0.000",  "#,##0.00"]
+    item_aligns  = [center,    center,     left,          right_align, right_align, right_align]
 
-    headers = ["Item No", "HS Code", "Description", "Quantity", "Rate (USD)", "Value F/C (USD)"]
-    for col, h in enumerate(headers, 1):
-        cell = ws3.cell(row=2, column=col, value=h)
+    # ── Column widths ─────────────────────────────────────────────────────────
+    # Col 1 = left padding, cols 2+ = data
+    ws.column_dimensions["A"].width = 3  # left padding
+
+    # Part I: 21 fields starting at col B (2)
+    part1_widths = [11, 13, 13, 13, 10, 10, 10, 8, 12, 6, 8, 8,
+                    11, 11, 11, 11, 13, 13, 13, 13, 10]
+    for i, w in enumerate(part1_widths):
+        ws.column_dimensions[get_column_letter(2 + i)].width = w
+
+    # Val dtls: 11 fields — reuse same cols 2-12 (they share the same columns)
+    # Items: 6 fields starting at col B (2) as well
+
+    # ── Row 1: top padding ────────────────────────────────────────────────────
+    ws.row_dimensions[1].height = 8
+
+    # ── Rows 2-3: Part I (headers + values) ──────────────────────────────────
+    write_header_row(2, part1_fields, start_col=2)
+    write_value_row(3, part1_fields, start_col=2)
+
+    # ── Row 4: spacer ─────────────────────────────────────────────────────────
+    ws.row_dimensions[4].height = 8
+
+    # ── Rows 5-6: Val Dtls (headers + values) ────────────────────────────────
+    write_header_row(5, val_dtls_fields, start_col=2)
+    write_value_row(6, val_dtls_fields, start_col=2)
+
+    # ── Row 7: spacer ─────────────────────────────────────────────────────────
+    ws.row_dimensions[7].height = 8
+
+    # ── Row 8: Items column headers ───────────────────────────────────────────
+    for i, h in enumerate(item_fields):
+        cell = ws.cell(row=8, column=2 + i, value=h)
         apply(cell, font=sub_font, fill=sub_fill, alignment=center, border=border)
-    ws3.row_dimensions[2].height = 20
+    ws.row_dimensions[8].height = 18
 
+    # ── Rows 9+: Item data ────────────────────────────────────────────────────
     for idx, item in enumerate(items):
-        r = idx + 3
+        r = 9 + idx
         fill = alt_fill if idx % 2 == 0 else None
-        values   = [item.get("item_no"), item.get("hs_code"), item.get("description"),
-                    item.get("quantity"), item.get("rate"), item.get("value_fc")]
-        aligns   = [center, center, left, right_align, right_align, right_align]
-        num_fmts = [None, None, None, "#,##0", "#,##0.000", "#,##0.00"]
-        for col, (val, aln, nfmt) in enumerate(zip(values, aligns, num_fmts), 1):
-            cell = ws3.cell(row=r, column=col, value=val)
+        values = [item.get("item_no"), item.get("hs_code"), item.get("description"),
+                  item.get("quantity"), item.get("rate"), item.get("value_fc")]
+        for i, (val, aln, nfmt) in enumerate(zip(values, item_aligns, item_nfmts)):
+            cell = ws.cell(row=r, column=2 + i, value=val)
             apply(cell, font=normal_font, fill=fill, alignment=aln,
                   border=border, number_format=nfmt)
-        ws3.row_dimensions[r].height = 30
+        ws.row_dimensions[r].height = 28
 
-    # Totals row
-    total_row = len(items) + 3
-    ws3.merge_cells(f"A{total_row}:C{total_row}")
-    ws3[f"A{total_row}"] = "TOTAL"
-    apply(ws3[f"A{total_row}"], font=bold_font, fill=sub_fill,
-          alignment=Alignment(horizontal="right", vertical="center"))
+    # ── Totals row ────────────────────────────────────────────────────────────
+    total_row = 9 + len(items)
+    ws.cell(row=total_row, column=2, value="TOTAL")
+    apply(ws.cell(row=total_row, column=2), font=bold_font, fill=sub_fill,
+          alignment=right_align, border=border)
+    apply(ws.cell(row=total_row, column=3), fill=sub_fill, border=border)  # HS Code blank
+    apply(ws.cell(row=total_row, column=4), fill=sub_fill, border=border)  # Description blank
 
-    qty_cell   = ws3.cell(row=total_row, column=4, value=f"=SUM(D3:D{total_row-1})")
-    value_cell = ws3.cell(row=total_row, column=6, value=f"=SUM(F3:F{total_row-1})")
+    qty_cell   = ws.cell(row=total_row, column=5,
+                         value=f"=SUM(E9:E{total_row-1})")
+    value_cell = ws.cell(row=total_row, column=7,
+                         value=f"=SUM(G9:G{total_row-1})")
     for cell, nfmt in [(qty_cell, "#,##0"), (value_cell, "#,##0.00")]:
         apply(cell, font=bold_font, fill=yellow_fill,
               alignment=right_align, border=border, number_format=nfmt)
-    apply(ws3.cell(row=total_row, column=5), fill=sub_fill, border=border)
+    apply(ws.cell(row=total_row, column=6), fill=sub_fill, border=border)  # Rate blank
 
-    ws3.freeze_panes = "A3"
-
+    ws.freeze_panes = "B9"
     wb.save(output_path)
     print(f"✅  Saved: {output_path}")
 
