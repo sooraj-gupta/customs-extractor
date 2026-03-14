@@ -239,7 +239,7 @@ def call_claude(prompt: str) -> str:
 
     client = anthropic.Anthropic(api_key=api_key)
     response = client.messages.create(
-        model="claude-sonnet-4-5",
+        model="claude-sonnet-4-20250514",
         max_tokens=4000,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -549,7 +549,14 @@ def main():
 
     # ── Process each PDF, collect results ────────────────────────────────────
     import os
-    all_results, failures = [], []
+    from datetime import datetime
+
+    all_results = []
+    failures    = []
+    skipped     = []  # list of (filename, reason)
+
+    seen_sb_nos  = set()
+    seen_inv_nos = set()
 
     for i, pdf_path in enumerate(pdf_paths):
         filename = os.path.basename(pdf_path)
@@ -563,6 +570,27 @@ def main():
 
             log("  → Extracting Part I (Claude)...")
             summary = extract_summary(part1_text)
+
+            # ── Duplicate check ───────────────────────────────────────────
+            sb_no  = str(summary.get("sb_no")  or "").strip()
+            inv_no = str(summary.get("inv_no") or "").strip()
+
+            dup_reason = None
+            if sb_no and sb_no in seen_sb_nos:
+                dup_reason = f"duplicate SB No ({sb_no})"
+            elif inv_no and inv_no in seen_inv_nos:
+                dup_reason = f"duplicate Invoice No ({inv_no})"
+
+            if dup_reason:
+                log(f"  ⚠️  SKIPPED — {dup_reason}")
+                skipped.append((filename, dup_reason))
+                progress_bar["value"] = i + 1
+                progress_win.update()
+                continue
+
+            # Not a duplicate — register and proceed
+            if sb_no:  seen_sb_nos.add(sb_no)
+            if inv_no: seen_inv_nos.add(inv_no)
 
             log("  → Extracting Part II (Claude + positional)...")
             part2_data = extract_part2(pdf_path, part2_text)
@@ -583,21 +611,36 @@ def main():
     if all_results:
         status_label.config(text="Building Excel...")
         progress_win.update()
-        output_path = os.path.join(output_dir, "customs_extracted.xlsx")
-        log(f"\n→ Writing {len(all_results)} PDF(s) to customs_extracted.xlsx ...")
+
+        timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_name = f"customs_extracted_{timestamp}.xlsx"
+        output_path = os.path.join(output_dir, output_name)
+
+        log(f"\n→ Writing {len(all_results)} PDF(s) to {output_name} ...")
         try:
             build_workbook(all_results, output_path)
             log(f"✅ Saved: {output_path}")
         except Exception as e:
             log(f"❌ Failed to save Excel: {e}")
-            failures.append(("customs_extracted.xlsx", str(e)))
+            failures.append((output_name, str(e)))
 
-    # ── Done ──────────────────────────────────────────────────────────────────
+    # ── Done summary ──────────────────────────────────────────────────────────
     status_label.config(text="Done!")
-    summary_msg = (f"✅ {len(all_results)} PDF(s) extracted into customs_extracted.xlsx\n"
-                   f"❌ {len(failures)} failed\n\nSaved to:\n{output_dir}")
+
+    summary_msg = (
+        f"✅ {len(all_results)} PDF(s) extracted\n"
+        f"⚠️  {len(skipped)} skipped (duplicates)\n"
+        f"❌ {len(failures)} failed\n\n"
+        f"Saved to:\n{output_dir}"
+    )
+
+    if skipped:
+        summary_msg += "\n\nSkipped (duplicates):\n"
+        summary_msg += "\n".join(f"  • {f} — {r}" for f, r in skipped)
+
     if failures:
-        summary_msg += "\n\nFailed:\n" + "\n".join(f"  • {f[0]}: {f[1]}" for f in failures)
+        summary_msg += "\n\nFailed:\n"
+        summary_msg += "\n".join(f"  • {f}: {r}" for f, r in failures)
 
     log("\n" + "=" * 50)
     log(summary_msg)
