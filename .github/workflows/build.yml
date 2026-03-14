@@ -27,18 +27,6 @@ jobs:
             --onefile `
             --windowed `
             --name "CustomsExtractor" `
-            --icon src/icon.ico `
-            --add-data "src;src" `
-            src/extract_customs.py
-        continue-on-error: false
-
-      - name: Build EXE (no icon fallback)
-        if: failure()
-        run: |
-          pyinstaller `
-            --onefile `
-            --windowed `
-            --name "CustomsExtractor" `
             src/extract_customs.py
 
       - name: Upload EXE as artifact

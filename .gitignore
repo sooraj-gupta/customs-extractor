@@ -10,3 +10,4 @@ key.txt
 *.pdf
 venv/
 .venv/
+.DS_Store
