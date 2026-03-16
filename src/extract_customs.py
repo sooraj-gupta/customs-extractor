@@ -1,25 +1,16 @@
 """
 extract_customs.py
 ------------------
-Extracts highlighted fields from Indian Customs EDI System PDFs.
-
-- Part I  (page 1):  summary fields — Port Code, SB No, SB Date, FOB Value,
-                     Freight, Insurance, Discount, COM, Deductions, P/C, Duty,
-                     Cess, DBK Claim, IGST AMT, Cess AMT, IGST Value,
-                     RODTEP AMT, ROSCTL AMT, INV NO, INV AMT, Currency
-- Part II (pages 2–N before Part III): item table — Item No, HS Code,
-                     Description, Quantity, UQC, Rate, Value (F/C)
-
-Usage:
-    python extract_customs.py <input.pdf> [output.xlsx]
+Hybrid extraction:
+- pdfplumber x/y field map  → all C.VALU SUMMA + EX.PR numeric fields
+- pdfplumber text regex     → port code, SB no, SB date, INV fields
+- Claude vision             → Part II C.VAL DTLS + item table
 
 Requirements:
-    pip install pdfplumber anthropic openpyxl
+    pip install pdfplumber pymupdf anthropic openpyxl
 """
 
-import sys
-import re
-import json
+import sys, re, json, base64
 import pdfplumber
 import anthropic
 from openpyxl import Workbook
@@ -27,300 +18,215 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 
-# ── 1. PDF TEXT EXTRACTION ────────────────────────────────────────────────────
+# ── 1. PART I EXTRACTION ─────────────────────────────────────────────────────
+# The C.VALU SUMMA and D.EX.PR sections have a fixed layout across all
+# Indian Customs EDI PDFs. Headers sit at y≈276 and y≈294; values sit
+# exactly 9px below at y≈285 and y≈303. x ranges are constant.
+# We simply read whichever numeric word falls within each field's x/y box.
 
-def get_part_texts(pdf_path: str) -> tuple[str, str]:
-    """
-    Returns (part1_text, part2_text).
-    Part I  = page 1 only.
-    Part II = pages 2..N where N is the last page before 'PART - III' appears.
-    """
+_FIELD_MAP = [
+    # (field_name,      x_min, x_max, val_y)
+    # x ranges derived from header midpoints with generous padding.
+    # Matching uses word midpoint (x0+x1)/2, so wide numbers still match.
+    ("fob_value",          72,   143,   285),
+    ("freight",           143,   194,   285),
+    ("insurance",         194,   238,   285),   # first half of merged "3.INSURANC4.DISCOU"
+    ("discount",          238,   286,   285),   # second half of merged header
+    ("com",               286,   352,   285),
+    ("dbk_claim",         352,   433,   285),
+    ("igst_amt",          433,   510,   285),
+    ("cess_amt",          510,   580,   285),
+    ("deductions",         69,   155,   303),
+    ("pc",                155,   248,   303),
+    ("duty",              248,   285,   303),
+    ("cess",              285,   352,   303),
+    ("igst_value",        350,   420,   303),
+    ("rodtep_amt",        420,   505,   303),
+    ("rosctl_amt",        505,   580,   303),
+]
+
+def extract_part1(pdf_path: str) -> dict:
+    out = {k: "" for k in [
+        "port_code","sb_no","sb_date",
+        "fob_value","freight","insurance","discount","com",
+        "deductions","pc","duty","cess",
+        "dbk_claim","igst_amt","cess_amt","igst_value","rodtep_amt","rosctl_amt",
+        "inv_no","inv_amt","currency",
+    ]}
+
     with pdfplumber.open(pdf_path) as pdf:
-        part1_text = pdf.pages[0].extract_text() or ""
+        words = pdf.pages[0].extract_words()
+        text  = pdf.pages[0].extract_text() or ""
 
-        part2_pages = []
-        for page in pdf.pages[1:]:
-            text = page.extract_text() or ""
-            if "PART - III" in text:
-                # Stop before Part III (page may contain both Part II rows
-                # at top and Part III below — grab only the Part II portion)
-                lines = text.split("\n")
-                part2_lines = []
-                for line in lines:
-                    if "PART - III" in line:
-                        break
-                    part2_lines.append(line)
-                if part2_lines:
-                    part2_pages.append("\n".join(part2_lines))
-                break
-            part2_pages.append(text)
+    # Numeric fields: match using word MIDPOINT so wide numbers don't fall outside range
+    for field, x_min, x_max, val_y in _FIELD_MAP:
+        hits = [
+            w for w in words
+            if abs(w["top"] - val_y) < 5                        # on the value row
+            and x_min <= (w["x0"] + w["x1"]) / 2 < x_max       # midpoint in column
+            and re.match(r'^[\d.,]+$', w["text"])               # is a number
+        ]
+        out[field] = hits[0]["text"] if hits else "0"
 
-        part2_text = "\n".join(part2_pages)
+    # Text fields: regex on the extracted text lines
+    for line in text.split("\n"):
+        # "INDIAN CUSTOMS EDI SYSTEM INSGF6 9774136 04-MAY-23"
+        m = re.search(r'(INSGF\d)\s+(\d{6,8})\s+(\d{2}-[A-Z]{3}-\d{2,4})', line)
+        if m and not out["sb_no"]:
+            out["port_code"] = m.group(1)
+            out["sb_no"]     = m.group(2)
+            out["sb_date"]   = m.group(3)
+        # "1 3E23A007 43936.9 USD"
+        m2 = re.search(r'^\d+\s+([A-Z0-9]+)\s+([\d.]+)\s+(USD|INR|EUR|GBP)', line.strip())
+        if m2 and not out["inv_no"]:
+            out["inv_no"]   = m2.group(1)
+            out["inv_amt"]  = m2.group(2)
+            out["currency"] = m2.group(3)
 
-    return part1_text, part2_text
+    return out
+
+# ── 2. PDF PAGES → IMAGES (for Claude vision) ────────────────────────────────
+
+def pdf_pages_to_images(pdf_path: str, page_indices: list, dpi: int = 150) -> list:
+    try:
+        import fitz
+    except ImportError:
+        import pymupdf as fitz
+    doc = fitz.open(pdf_path)
+    mat = fitz.Matrix(dpi/72, dpi/72)
+    imgs = []
+    for i in page_indices:
+        if i < len(doc):
+            pix = doc[i].get_pixmap(matrix=mat)
+            imgs.append(pix.tobytes("png"))
+    doc.close()
+    return imgs
 
 
-# ── 2. AI EXTRACTION ──────────────────────────────────────────────────────────
-
-PART1_PROMPT = """You are a data extraction assistant for Indian Customs EDI shipping bills.
-
-Extract ONLY the following fields from the Part I shipping bill summary text below.
-
-IMPORTANT FIELD MAPPING RULES — the C.VALU SUMMA section has this exact column order:
-  "1.FOB VALUE | 2.FREIGHT | 3.INSURANC | 4.DISCOU | 5.COM"
-  "6.DEDUCTIONS | 7.P/C | 8.DUTY | 9.CESS"
-
-The values appear on the line(s) BELOW the column headers in the SAME left-to-right order.
-For example if the text reads:
-  "1.FOB VALUE  2.FREIGHT  3.INSURANC  4.DISCOU  5.COM"
-  "3575464.88   0          999         0          0"
-Then: fob_value=3575464.88, freight=0, insurance=999, discount=0, com=0
-
-Map each number strictly to its column position — do NOT guess from the value itself.
-
-Return a JSON object with exactly these keys (use null if not found):
-
-{{
-  "port_code": "",
-  "sb_no": "",
-  "sb_date": "",
-  "fob_value": "",
-  "freight": "",
-  "insurance": "",
-  "discount": "",
-  "com": "",
-  "deductions": "",
-  "pc": "",
-  "duty": "",
-  "cess": "",
-  "dbk_claim": "",
-  "igst_amt": "",
-  "cess_amt": "",
-  "igst_value": "",
-  "rodtep_amt": "",
-  "rosctl_amt": "",
-  "inv_no": "",
-  "inv_amt": "",
-  "currency": ""
-}}
-
-Return ONLY the JSON object, no explanation, no markdown.
-
---- PART I TEXT ---
-{text}
-"""
-
-PART2_ITEMS_PROMPT = """You are a data extraction assistant for Indian Customs EDI shipping bills.
-
-From the Part II invoice details text below, extract ONLY the item table (D. ITEM DETAILS).
-Each item has columns: Item No, HS Code, Description, Quantity, Rate, Value(F/C).
-Do NOT extract UQC.
-
-Return a JSON array where each element is:
-{{
-  "item_no": 1,
-  "hs_code": "73089090",
-  "description": "BAR B ARM 2\" X 1-5/8\" (BLACK)",
-  "quantity": 750,
-  "rate": 1.546,
-  "value_fc": 1159.5
-}}
-
-Rules:
-- Combine split description lines into one clean string (descriptions often wrap to next line)
-- Strip any OCR noise characters (lone letters like "O", "X", "E" on their own line are not part of description)
-- quantity, rate, value_fc should be numbers (not strings)
-- item_no should be an integer
-- Include ALL items found across all pages
-- Return ONLY the JSON array, no explanation, no markdown.
-
---- PART II TEXT ---
-{text}
-"""
-
-# Column x-boundaries for C.VAL DTLS positional extraction
-# Based on the fixed form layout of Indian Customs EDI PDFs
-_VAL_DTLS_COLS = {
-    "invoice_value": (75,  145),
-    "fob_value":     (145, 220),
-    "freight":       (220, 266),
-    "insurance":     (266, 313),
-    "discount":      (313, 360),
-    "commission":    (360, 406),
-    "deduct":        (406, 465),
-    "pc":            (465, 497),
-    "exchange_rate": (497, 580),
-}
-
-def extract_val_dtls_positional(pdf_path: str) -> dict:
-    """
-    Extracts C.VAL DTLS values using word x-coordinates rather than text order,
-    avoiding the column-swap problem caused by pdfplumber's text linearisation.
-    """
+def find_part2_end(pdf_path: str) -> int:
     with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages[1:]:
-            words = page.extract_words()
-
-            # Locate the header anchor word "1.INVOICE"
-            header_y = None
-            for w in words:
-                if w["text"] == "1.INVOICE":
-                    header_y = w["top"]
-                    break
-            if header_y is None:
-                continue
-
-            # Value row sits ~13–14 px below the header row
-            value_y   = header_y + 13.6
-            tol       = 8
-
-            val_words = [w for w in words if abs(w["top"] - value_y) < tol]
-            val_words.sort(key=lambda w: w["x0"])
-
-            result = {k: "0" for k in _VAL_DTLS_COLS}
-
-            for w in val_words:
-                cx = (w["x0"] + w["x1"]) / 2
-                txt = w["text"]
-                for col, (x_min, x_max) in _VAL_DTLS_COLS.items():
-                    if x_min <= cx < x_max:
-                        if col == "exchange_rate":
-                            result[col] = (result[col] + " " + txt).strip() \
-                                          if result[col] != "0" else txt
-                        else:
-                            result[col] = txt
-                        break
-
-            # Currency labels appear ~22 px below header
-            curr_y    = header_y + 22
-            curr_words = [w for w in words
-                          if abs(w["top"] - curr_y) < 8
-                          and w["text"] in ("USD", "INR", "EUR", "GBP")]
-            result["invoice_currency"] = next(
-                (w["text"] for w in curr_words if 75  <= (w["x0"]+w["x1"])/2 < 145), "")
-            result["fob_currency"]     = next(
-                (w["text"] for w in curr_words if 145 <= (w["x0"]+w["x1"])/2 < 220), "")
-
-            return result
-
-    return {}
+        for i, page in enumerate(pdf.pages):
+            if i > 0 and "PART - III" in (page.extract_text() or ""):
+                return i
+        return len(pdf.pages)
 
 
-def call_claude(prompt: str) -> str:
+# ── 3. CLAUDE VISION (Part II: val_dtls + items) ─────────────────────────────
+
+PART2_PROMPT = """You are reading Part II invoice detail pages of an Indian Customs EDI System shipping bill.
+
+Extract TWO things:
+
+1. C.VAL DTLS row (near top of first page, left side, labeled C.VAL DTLS or C.VAL/DTLS):
+   The row has HEADER labels on one line and DATA VALUES on the line below.
+   Column order strictly left to right:
+   Invoice Value | FOB Value | Freight | Insurance | Discount | Commission | Deduct | P/C | Exchange Rate
+
+   The currency for Invoice Value and FOB Value appears just below their number (e.g. "USD").
+   Exchange Rate looks like "1 USD INR 81.4".
+
+   IMPORTANT: Values are numbers only. Do not output header label text as values.
+
+2. ALL items from the D.ITEM DETAILS table across ALL pages shown.
+   Columns: Item No, HS Code, Description, Quantity, Rate, Value(F/C).
+   Clean up wrapped/split description text into one string per item.
+   quantity, rate, value_fc must be numbers.
+   Include every item — do not stop early.
+
+Return this exact JSON (no markdown, no explanation):
+{
+  "val_dtls": {
+    "invoice_value": "",
+    "invoice_currency": "",
+    "fob_value": "",
+    "fob_currency": "",
+    "freight": "",
+    "insurance": "",
+    "discount": "",
+    "commission": "",
+    "deduct": "",
+    "pc": "",
+    "exchange_rate": ""
+  },
+  "items": [
+    {
+      "item_no": 1,
+      "hs_code": "73089090",
+      "description": "full clean description",
+      "quantity": 750,
+      "rate": 1.546,
+      "value_fc": 1159.5
+    }
+  ]
+}"""
+
+
+def get_api_key() -> str:
     import os
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        # Read from a key.txt file next to the exe, set once by user
-        key_file = os.path.join(os.path.dirname(sys.executable)
-                                if getattr(sys, "frozen", False)
-                                else os.path.dirname(os.path.abspath(__file__)),
-                                "key.txt")
-        if os.path.exists(key_file):
-            with open(key_file) as f:
-                api_key = f.read().strip()
-        else:
-            import tkinter as tk
-            from tkinter import simpledialog, messagebox
-            root = tk.Tk(); root.withdraw()
-            api_key = simpledialog.askstring(
-                "API Key Required",
-                "Enter your Anthropic API key.\n\n"
-                "Tip: create a file called key.txt next to this app\n"
-                "and paste your key there to avoid this prompt.",
-                show="*"
-            )
-            if not api_key:
-                messagebox.showerror("Error", "No API key provided. Exiting.")
-                sys.exit(1)
-            # Offer to save it
-            if messagebox.askyesno("Save key?", "Save key to key.txt so you're not asked again?"):
-                with open(key_file, "w") as f:
-                    f.write(api_key)
-
-    client = anthropic.Anthropic(api_key=api_key)
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=4000,
-        messages=[{"role": "user", "content": prompt}]
+    key = os.environ.get("ANTHROPIC_API_KEY","")
+    if key: return key
+    key_file = os.path.join(
+        os.path.dirname(sys.executable) if getattr(sys,"frozen",False)
+        else os.path.dirname(os.path.abspath(__file__)),
+        "key.txt"
     )
-    return response.content[0].text.strip()
+    if os.path.exists(key_file):
+        with open(key_file) as f: return f.read().strip()
+    import tkinter as tk
+    from tkinter import simpledialog, messagebox
+    root = tk.Tk(); root.withdraw()
+    key = simpledialog.askstring(
+        "API Key Required",
+        "Enter your Anthropic API key.\n\nTip: put it in key.txt next to this app.",
+        show="*"
+    )
+    if not key:
+        messagebox.showerror("Error","No API key provided. Exiting."); sys.exit(1)
+    if messagebox.askyesno("Save key?","Save to key.txt so you're not asked again?"):
+        with open(key_file,"w") as f: f.write(key)
+    return key
 
 
-def extract_summary(part1_text: str) -> dict:
-    # Pre-process: find and annotate the valuation rows so AI maps them correctly.
-    # pdfplumber loses column alignment; we know the fixed column order from the form:
-    #   Row 1 headers: 1.FOB VALUE | 2.FREIGHT | 3.INSURANC | 4.DISCOU | 5.COM
-    #   Row 2 values:  fob_value     freight      insurance    discount   com
-    #   Row 3 headers: 6.DEDUCTIONS | 7.P/C | 8.DUTY | 9.CESS
-    #   Row 4 values:  deductions     pc       duty     cess
-    #
-    # pdfplumber extracts FOB VALUE on its own line (e.g. "LM 3575464.88")
-    # and the remaining values on one line (e.g. "0 999 0 0")
-    # We annotate these lines before sending to AI.
+def call_claude_vision(prompt: str, image_bytes_list: list) -> str:
+    client  = anthropic.Anthropic(api_key=get_api_key())
+    content = []
+    for img in image_bytes_list:
+        content.append({"type":"image","source":{
+            "type":"base64","media_type":"image/png",
+            "data": base64.standard_b64encode(img).decode()
+        }})
+    content.append({"type":"text","text":prompt})
+    resp = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=4096,
+        messages=[{"role":"user","content":content}]
+    )
+    return resp.content[0].text.strip()
 
-    import re
-    lines = part1_text.split('\n')
-    annotated_lines = []
 
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-
-        # Detect the header line for the first valuation row
-        if '1.FOB VALUE' in line and '2.FREIGHT' in line:
-            annotated_lines.append("=== VALUATION ROW 1 HEADERS: [1.FOB VALUE] [2.FREIGHT] [3.INSURANCE] [4.DISCOUNT] [5.COM] ===")
-            annotated_lines.append(line)
-            # FOB value may be on a prior line by itself (pdfplumber quirk)
-            # Search backwards for it
-            fob_val = None
-            for back in range(max(0, i-5), i):
-                m = re.search(r'(\d[\d,]+\.\d+)', lines[back])
-                if m and float(m.group(1).replace(',', '')) > 1000:
-                    fob_val = m.group(1)
-            if fob_val:
-                annotated_lines.append(f"FOB_VALUE_FOUND_ON_PRIOR_LINE: {fob_val}")
-
-            # Next line(s) with values: "0 999 0 0" = freight, insurance, discount, com
-            if i + 1 < len(lines):
-                next_line = lines[i + 1].strip()
-                nums = re.findall(r'[\d,]+(?:\.\d+)?', next_line)
-                if nums:
-                    labels = ['FREIGHT', 'INSURANCE', 'DISCOUNT', 'COM']
-                    annotated_lines.append("VALUES IN COLUMN ORDER: " +
-                        ", ".join(f"{labels[j]}={nums[j]}" for j in range(min(len(labels), len(nums)))))
-            i += 1
-
-        # Detect deductions row
-        elif '6.DEDUCTIONS' in line and '8.DUTY' in line:
-            annotated_lines.append("=== VALUATION ROW 2 HEADERS: [6.DEDUCTIONS] [7.P/C] [8.DUTY] [9.CESS] ===")
-            annotated_lines.append(line)
-            if i + 1 < len(lines):
-                next_line = lines[i + 1].strip()
-                nums = re.findall(r'[\d,]+(?:\.\d+)?', next_line)
-                if nums:
-                    labels = ['DEDUCTIONS', 'PC', 'DUTY', 'CESS']
-                    annotated_lines.append("VALUES IN COLUMN ORDER: " +
-                        ", ".join(f"{labels[j]}={nums[j]}" for j in range(min(len(labels), len(nums)))))
-            i += 1
-        else:
-            annotated_lines.append(line)
-        i += 1
-
-    annotated_text = '\n'.join(annotated_lines)
-    raw = call_claude(PART1_PROMPT.format(text=annotated_text))
-    raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("```").strip()
+def parse_json(raw: str):
+    raw = re.sub(r"^```[a-z]*\n?","",raw.strip()).rstrip("`").strip()
     return json.loads(raw)
 
 
-def extract_part2(pdf_path: str, part2_text: str) -> dict:
-    val_dtls = extract_val_dtls_positional(pdf_path)
+# ── 4. MAIN EXTRACTION ────────────────────────────────────────────────────────
 
-    raw = call_claude(PART2_ITEMS_PROMPT.format(text=part2_text))
-    raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("```").strip()
-    items = json.loads(raw)
+def extract_from_pdf(pdf_path: str) -> tuple:
+    """Returns (summary, val_dtls, items)."""
+    # Part I: fully positional — no AI
+    summary = extract_part1(pdf_path)
 
-    return {"val_dtls": val_dtls, "items": items}
+    # Part II: Claude vision for val_dtls + items
+    part2_end  = find_part2_end(pdf_path)
+    part2_idxs = list(range(1, min(part2_end, 5)))  # pages 1-4 max
+    part2_imgs = pdf_pages_to_images(pdf_path, part2_idxs)
 
+    raw      = call_claude_vision(PART2_PROMPT, part2_imgs)
+    part2    = parse_json(raw)
+    val_dtls = part2.get("val_dtls", {})
+    items    = part2.get("items", [])
+
+    return summary, val_dtls, items
 
 # ── 3. EXCEL OUTPUT ───────────────────────────────────────────────────────────
 
@@ -607,11 +513,8 @@ def main():
         progress_win.update()
 
         try:
-            log("  → Reading PDF...")
-            part1_text, part2_text = get_part_texts(pdf_path)
-
-            log("  → Extracting Part I (Claude)...")
-            summary = extract_summary(part1_text)
+            log("  → Rendering PDF + extracting Part I with Claude vision...")
+            summary, val_dtls, items = extract_from_pdf(pdf_path)
 
             # ── Duplicate check ───────────────────────────────────────────
             sb_no  = str(summary.get("sb_no")  or "").strip()
@@ -633,11 +536,6 @@ def main():
             # Not a duplicate — register and proceed
             if sb_no:  seen_sb_nos.add(sb_no)
             if inv_no: seen_inv_nos.add(inv_no)
-
-            log("  → Extracting Part II (Claude + positional)...")
-            part2_data = extract_part2(pdf_path, part2_text)
-            val_dtls = part2_data.get("val_dtls", {})
-            items    = part2_data.get("items", [])
 
             all_results.append({"summary": summary, "val_dtls": val_dtls, "items": items})
             log(f"  ✅ Extracted {len(items)} items")

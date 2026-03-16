@@ -3,7 +3,10 @@ name: Build Windows EXE
 on:
   push:
     branches: [main]
-  workflow_dispatch:  # allows manual trigger from GitHub UI
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build-windows:
@@ -36,8 +39,7 @@ jobs:
           path: dist/CustomsExtractor.exe
           retention-days: 30
 
-      - name: Create Release (on push to main)
-        if: github.ref == 'refs/heads/main'
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
@@ -55,7 +57,5 @@ jobs:
             sk-ant-your-key-here
             ```
           files: dist/CustomsExtractor.exe
-          draft: false
-          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
