@@ -30,9 +30,9 @@ jobs:
             --onefile `
             --windowed `
             --name "CustomsExtractor" `
-            --hidden-import "pymupdf" `
-            --hidden-import "pymupdf.frontend" `
-            --collect-all "pymupdf" `
+            --hidden-import "fitz" `
+            --hidden-import "pdfplumber" `
+            --collect-all "fitz" `
             --collect-all "pdfplumber" `
             src/extract_customs.py
 
