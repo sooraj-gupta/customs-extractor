@@ -70,6 +70,7 @@ def call_claude(prompt: str, pdf_b64: str, max_tokens: int = 2048) -> str:
             ]
         }]
     )
+    print(resp)
     return resp.content[0].text.strip()
 
 
@@ -117,14 +118,16 @@ Sections on this page:
 
 Top-right header box:
   Port Code | SB No | SB Date
+  
+  * for the item_count, look at the "Nos" row and there should be 3 numbers, choose the 2nd one (the one in the middle). this needs to be exact, make sure you are looking at exactly the Nos row
 
-C.VALU SUMMA section (left side, mid-page):
+C.VALU SUMMA section (left side, mid-page): These values should ALWAYS be numbers. If you see a header label in a value cell, return "0" for that field.
   Row 1 headers: 1.FOB VALUE | 2.FREIGHT | 3.INSURANC | 4.DISCOU | 5.COM
   Row 1 values:  fob_value     freight      insurance    discount   com
   Row 2 headers: 6.DEDUCTIONS | 7.P/C | 8.DUTY | 9.CESS
   Row 2 values:  deductions     pc      duty     cess
 
-D.EX.PR section (right side, same area):
+D.EX.PR section (right side, same area):  These values should ALWAYS be numbers. If you see a header label in a value cell, return "0" for that field.
   Row 1 headers: 1.DBK CLAIM | 2.IGST AMT | 3.CESS AMT
   Row 1 values:  dbk_claim     igst_amt     cess_amt
   Row 2 headers: 4.IGST VALUE | 5.RODTEP AMT | 6.ROSCTL AMT
@@ -157,7 +160,8 @@ Return ONLY this JSON:
   "rosctl_amt": "",
   "inv_no": "",
   "inv_amt": "",
-  "currency": ""
+  "currency": "",
+  "item_count": 0
 }"""
 
 PART2_PROMPT = """This is page 2 of an Indian Customs EDI System shipping bill (PART II - INVOICE DETAILS).
@@ -169,11 +173,9 @@ Extract TWO things:
    Currency labels (e.g. USD) appear below Invoice Value and FOB Value.
    Exchange Rate looks like "1 USD INR 81.4". Values must be numbers only.
 
-2. Items from the D.ITEM DETAILS table on this page:
+2. ALL items from the D.ITEM DETAILS table on this page:
    Columns: Item No, HS Code, Description, Quantity, Rate, Value(F/C)
    Combine wrapped description lines. quantity/rate/value_fc must be numbers.
-
-Also tell me if the item table is cut off and continues on the next page.
 
 Return ONLY this JSON:
 {
@@ -192,28 +194,14 @@ Return ONLY this JSON:
   },
   "items": [
     {"item_no": 1, "hs_code": "73089090", "description": "clean description", "quantity": 750, "rate": 1.546, "value_fc": 1159.5}
-  ],
-  "has_more_items": false
-}"""
-
-PART_EXTRA_PROMPT = """This is page {page_num} of an Indian Customs EDI System shipping bill, continuing the D.ITEM DETAILS table from the previous page.
-
-Extract ALL items shown on this page from the D.ITEM DETAILS table.
-Columns: Item No, HS Code, Description, Quantity, Rate, Value(F/C)
-Combine wrapped description lines. quantity/rate/value_fc must be numbers.
-
-Also tell me if the table continues on yet another page (i.e. this page ends mid-table without a "PART - III" header appearing).
-
-Return ONLY this JSON:
-{
-  "items": [
-    {"item_no": 1, "hs_code": "73089090", "description": "clean description", "quantity": 750, "rate": 1.546, "value_fc": 1159.5}
-  ],
-  "has_more_items": false
+  ]
 }"""
 
 
 # ── 3. EXTRACTION ─────────────────────────────────────────────────────────────
+
+# Typical items per page in Part II (conservative estimate)
+ITEMS_PER_PAGE = 15
 
 def extract_from_pdf(pdf_path: str, log=None) -> tuple:
     """Returns (summary, val_dtls, items). Processes pages one at a time."""
@@ -222,7 +210,7 @@ def extract_from_pdf(pdf_path: str, log=None) -> tuple:
 
     total = num_pages(pdf_path)
 
-    # Page 1 — summary fields
+    # Page 1 — summary fields + item_count
     _log("  → Page 1: extracting summary...")
     summary = {}
     for _ in range(2):
@@ -232,38 +220,41 @@ def extract_from_pdf(pdf_path: str, log=None) -> tuple:
         except (ValueError, json.JSONDecodeError):
             pass
 
+    # Use item_count from page 1 to know how many pages we need
+    item_count = int(summary.get("item_count") or 0)
+    _log(f"  → Item count from page 1: {item_count}")
+
     # Page 2 — val_dtls + first batch of items
     val_dtls, items = {}, []
     if total < 2:
         return summary, val_dtls, items
 
     _log("  → Page 2: extracting val_dtls + items...")
-    has_more = False
     for _ in range(2):
         try:
-            result   = parse_json(call_claude(PART2_PROMPT, page_to_b64(pdf_path, 1), max_tokens=4096))
+            result   = parse_json(call_claude(PART2_PROMPT, page_to_b64(pdf_path, 1), max_tokens=8192))
             val_dtls = result.get("val_dtls", {})
             items    = result.get("items", [])
-            has_more = result.get("has_more_items", False)
+            #log the number of items extracted on page 2
+            _log(f"  → Extracted {len(items)} items from page 2")
             break
         except (ValueError, json.JSONDecodeError):
             pass
 
-    # Pages 3+ — fetch only if needed and only up to page 4
+    # Fetch more pages only if item_count says we're missing items
     for page_idx in range(2, min(total, 4)):
-        if not has_more:
+        if len(items) >= item_count:
             break
-        _log(f"  → Page {page_idx + 1}: fetching more items...")
-        prompt = PART_EXTRA_PROMPT.format(page_num=page_idx + 1)
-        for _ in range(2):
-            try:
-                result    = parse_json(call_claude(prompt, page_to_b64(pdf_path, page_idx), max_tokens=4096))
-                new_items = result.get("items", [])
-                has_more  = result.get("has_more_items", False)
-                items.extend(new_items)
-                break
-            except (ValueError, json.JSONDecodeError):
-                has_more = False
+        _log(f"  → Page {page_idx + 1}: fetching more items ({len(items)}/{item_count} so far)...")
+        prompt = PART2_PROMPT
+        try:
+            claude_output = call_claude(prompt, page_to_b64(pdf_path, page_idx), max_tokens=8192)
+            result = parse_json(claude_output)
+            new_items = result if isinstance(result, list) else result.get("items", [])
+            items.extend(new_items)
+            break
+        except (ValueError, json.JSONDecodeError):
+            break
 
     return summary, val_dtls, items
 
