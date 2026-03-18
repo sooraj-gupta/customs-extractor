@@ -242,7 +242,7 @@ def extract_from_pdf(pdf_path: str, log=None) -> tuple:
             pass
 
     # Fetch more pages only if item_count says we're missing items
-    for page_idx in range(2, min(total, 4)):
+    for page_idx in range(2, total):
         if len(items) >= item_count:
             break
         _log(f"  → Page {page_idx + 1}: fetching more items ({len(items)}/{item_count} so far)...")
@@ -252,7 +252,6 @@ def extract_from_pdf(pdf_path: str, log=None) -> tuple:
             result = parse_json(claude_output)
             new_items = result if isinstance(result, list) else result.get("items", [])
             items.extend(new_items)
-            break
         except (ValueError, json.JSONDecodeError):
             break
 
