@@ -30,6 +30,10 @@ jobs:
             --onefile `
             --windowed `
             --name "CustomsExtractor" `
+            --hidden-import "pymupdf" `
+            --hidden-import "pymupdf.frontend" `
+            --collect-all "pymupdf" `
+            --collect-all "pdfplumber" `
             src/extract_customs.py
 
       - name: Upload EXE as artifact
