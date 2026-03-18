@@ -30,10 +30,6 @@ jobs:
             --onefile `
             --windowed `
             --name "CustomsExtractor" `
-            --hidden-import "fitz" `
-            --hidden-import "pdfplumber" `
-            --collect-all "fitz" `
-            --collect-all "pdfplumber" `
             src/extract_customs.py
 
       - name: Upload EXE as artifact
